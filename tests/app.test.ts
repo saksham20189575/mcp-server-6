@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createApp, resolveAllowedHosts } from '../src/create-app.js';
 import { requireAuthToken } from '../src/http.js';
@@ -40,6 +41,17 @@ async function readJsonRpc(res: Response): Promise<JsonRpcMessage[]> {
   if (!text.trim()) return [];
   return [JSON.parse(text) as JsonRpcMessage];
 }
+
+/** Same check as `@vercel/hono`: the entry file source must import the `hono` package. */
+const VERCEL_HONO_ENTRY =
+  /(?:from|require|import)\s*(?:\(\s*)?["']hono["']\s*(?:\))?/;
+
+describe('Vercel Hono entrypoint', () => {
+  it('src/app.ts imports hono so the framework preset can find it', () => {
+    const source = readFileSync(new URL('../src/app.ts', import.meta.url), 'utf8');
+    expect(source).toMatch(VERCEL_HONO_ENTRY);
+  });
+});
 
 describe('resolveAllowedHosts', () => {
   it('collects Vercel URLs and MCP_ALLOWED_HOSTS', () => {
