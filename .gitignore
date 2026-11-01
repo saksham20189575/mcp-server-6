@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+# Secrets: never commit OAuth client credentials or tokens
+.env
+.env.*
+!.env.example
+secrets/
+*token*.json
+credentials*.json
+client_secret*.json
+
+.DS_Store
+*.log

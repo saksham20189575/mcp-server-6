@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "google-workspace": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/google-workspace-mcp/dist/index.js"],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS_PATH": "/ABSOLUTE/PATH/TO/credentials.json",
+        "GOOGLE_OAUTH_TOKEN_PATH": "/ABSOLUTE/USER-PRIVATE/PATH/google-workspace-mcp-token.json"
+      }
+    }
+  }
+}

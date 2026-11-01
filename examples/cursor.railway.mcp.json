@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "google-workspace": {
+      "url": "https://<your-domain>.up.railway.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:GOOGLE_WORKSPACE_MCP_TOKEN}"
+      }
+    }
+  }
+}
