@@ -1,6 +1,6 @@
-# Deployment Plan: `google-workspace-mcp` on Render
+# Deployment Plan: `google-workspace-mcp` on Vercel
 
-**Status:** Coding changes implemented (container + HTTP entry + env secrets + Render Blueprint). Render project setup (§6.3–6.6) is still manual.
+**Status:** Coding changes implemented (Hono/`src/app.ts` entry + env-backed Google token + `vercel.json`). Project link and env vars in the Vercel dashboard (§6.3–6.5) are still manual.
 **Related:** [`architecture.md`](./architecture.md), [`problemStatement.md`](./problemStatement.md)
 
 ---
@@ -9,14 +9,14 @@
 
 Today the server is a **local, single-user, `stdio`** process. MCP hosts spawn it with `node dist/index.js` and it reads two files from disk: the OAuth client (`credentials.json`) and the refresh token (`token.json`).
 
-Render runs long-lived **web services** that must listen on `$PORT` and are reached over a public HTTPS URL. Deploying therefore requires four changes, in this order of importance:
+Vercel runs the MCP endpoint as a **serverless Function** (Hono on Fluid compute) behind HTTPS. Deploying therefore requires:
 
 1. **Protect the endpoint.** A public URL that can send email and edit Docs *as you* must reject every request without a valid secret.
-2. **Add an HTTP entry point** (MCP Streamable HTTP) next to the existing stdio one.
-3. **Load secrets from environment variables** instead of local files, with the token persisted on a Render disk.
-4. **Containerize** with a pinned Node 20 image and a `render.yaml` Blueprint.
+2. **Serve Streamable HTTP** from a Vercel-recognized entry (`src/app.ts`) next to the existing stdio and Node HTTP entries.
+3. **Load secrets from environment variables** (no persistent disk — unlike Render). Keep `GOOGLE_OAUTH_TOKEN_JSON` set permanently.
+4. **Deploy** with the Vercel CLI or a Git-connected project (`vercel.json`).
 
-The tool logic (`server.ts`, `gmail.ts`, `docs.ts`, `validation.ts`, `errors.ts`) does not change. The stdio entry stays for local use.
+The tool logic (`server.ts`, `gmail.ts`, `docs.ts`, `validation.ts`, `errors.ts`) does not change. Stdio stays for local use; `npm run start:http` / Docker remain optional for non-Vercel hosts.
 
 > This deliberately goes beyond the MVP non-goals in `architecture.md` §1 ("HTTP transport, hosting"). It stays **single-user**: one Google account, one deployment.
 
@@ -31,11 +31,10 @@ flowchart LR
         ClaudeCode["Claude Code"]
         Other["Other hosts"]
     end
-    subgraph Render["Render service"]
-        Edge["Render edge<br/>HTTPS + *.onrender.com"]
-        Svc["google-workspace-mcp<br/>node dist/http.js on $PORT"]
-        Vol[("Disk /data<br/>token.json (0600)")]
-        Vars[["Env vars<br/>MCP_AUTH_TOKEN<br/>GOOGLE_OAUTH_CREDENTIALS_JSON<br/>GOOGLE_OAUTH_TOKEN_JSON (seed)"]]
+    subgraph Vercel["Vercel"]
+        Edge["Vercel edge<br/>HTTPS + *.vercel.app"]
+        Fn["google-workspace-mcp<br/>Hono src/app.ts → /mcp"]
+        Vars[["Env vars<br/>MCP_AUTH_TOKEN<br/>GOOGLE_OAUTH_CREDENTIALS_JSON<br/>GOOGLE_OAUTH_TOKEN_JSON"]]
     end
     subgraph Google["Google Cloud"]
         OAuth["OAuth 2.0"]
@@ -43,174 +42,116 @@ flowchart LR
         Docs["Docs API"]
     end
 
-    Hosts -->|"POST /mcp<br/>Authorization: Bearer MCP_AUTH_TOKEN"| Edge --> Svc
-    Vars --> Svc
-    Svc <--> Vol
-    Svc -->|refresh| OAuth
-    Svc --> Gmail
-    Svc --> Docs
+    Hosts -->|"POST /mcp<br/>Authorization: Bearer MCP_AUTH_TOKEN"| Edge --> Fn
+    Vars --> Fn
+    Fn -->|refresh| OAuth
+    Fn --> Gmail
+    Fn --> Docs
 ```
 
-| Concern | Local today | On Render |
+| Concern | Local today | On Vercel |
 | --- | --- | --- |
 | Transport | stdio | Streamable HTTP at `POST /mcp` |
-| Entry point | `dist/index.js` | `dist/http.js` (new) |
+| Entry point | `dist/index.js` | `src/app.ts` (Hono default export) |
 | Who can call tools | Only processes your OS user spawns | Anyone with the URL **and** `MCP_AUTH_TOKEN` |
 | OAuth client | `credentials.json` file | `GOOGLE_OAUTH_CREDENTIALS_JSON` variable |
-| Refresh token | `~/.config/google-workspace-mcp/token.json` | Seeded from `GOOGLE_OAUTH_TOKEN_JSON`, stored at `/data/token.json` on a disk |
-| Initial consent | `npm run auth` (browser) | Still `npm run auth` **on your machine**; the token is then uploaded |
-| Logs | stderr | stderr (Render captures it) |
+| Refresh token | `~/.config/google-workspace-mcp/token.json` | `GOOGLE_OAUTH_TOKEN_JSON` (always set; optional `/tmp` seed) |
+| Initial consent | `npm run auth` (browser) | Still `npm run auth` **on your machine**; upload the token JSON |
+| Logs | stderr | Vercel **Runtime Logs** |
 
 ---
 
 ## 3. Security Requirements (must be done before the first deploy)
 
-The tools perform real writes. On Render, the host-side approval prompt is the only human check, and it only exists if the caller is *your* host. So the server itself must authenticate callers.
+The tools perform real writes. On Vercel, the host-side approval prompt is the only human check, and it only exists if the caller is *your* host. So the server itself must authenticate callers.
 
 | # | Requirement | Detail |
 | --- | --- | --- |
 | S1 | Bearer token on every MCP request | `MCP_AUTH_TOKEN`: at least 32 random bytes (`openssl rand -base64 48`). Compare with `crypto.timingSafeEqual`. Missing or wrong token: `401` with `WWW-Authenticate: Bearer`, without creating an MCP server instance. |
-| S2 | Fail closed | If `MCP_AUTH_TOKEN` is unset or shorter than 32 characters, the process **exits at startup**. No "open" mode. |
+| S2 | Fail closed | If `MCP_AUTH_TOKEN` is unset or shorter than 32 characters, the process **throws at startup**. No "open" mode. |
 | S3 | Only the expected routes | `POST /mcp` (and `GET`/`DELETE` as the SDK requires), `GET /healthz`. Everything else returns `404`. |
-| S4 | Body size limit | Keep the SDK default (4 MiB) or lower it to 1 MiB; tool inputs are capped at 100 KB already. |
-| S5 | Secrets only in Render env vars | Never commit `credentials.json`, `token.json`, or `.env`. Add a `.dockerignore` so they never enter the image. |
+| S4 | Body size limit | 1 MiB; tool inputs are capped at 100 KB already. |
+| S5 | Secrets only in Vercel env vars | Never commit `credentials.json`, `token.json`, or `.env`. `.vercelignore` excludes them from uploads. |
 | S6 | No secrets in logs | Keep the existing redacting logger; never log the `Authorization` header. |
-| S7 | Single replica | One instance only. Avoids concurrent token rotation writes and keeps behavior identical to the local design. |
+| S7 | Stateless | Each invocation can land on a different instance. Token durability comes from env vars, not disk. |
 | S8 | Rotation | Rotating `MCP_AUTH_TOKEN` means updating the variable and every host config. Revoking Google access: [myaccount.google.com/permissions](https://myaccount.google.com/permissions). |
 
-A static bearer token suits a single user. If you later share the server or use hosts that only support OAuth connectors, replace S1 with MCP OAuth (the SDK exports `requireBearerAuth`, `verifyBearerToken`, and protected-resource metadata helpers). That is out of scope for this plan.
+A static bearer token suits a single user. MCP OAuth helpers exist in the SDK but are out of scope for this plan.
 
 ---
 
 ## 4. Code Changes
 
-### 4.1 New HTTP entry point: `src/http.ts`
+### 4.1 Vercel entry: `src/app.ts` + `src/create-app.ts`
 
-Uses `createMcpHandler` from `@modelcontextprotocol/server` (already installed) plus `toNodeHandler` from `@modelcontextprotocol/node`. Bearer auth gates `/mcp`; `/healthz` is open for the platform health check. Binds to `0.0.0.0` on `$PORT`. Handles `SIGTERM`/`SIGINT` for clean redeploys.
+Uses `createMcpHonoApp` from `@modelcontextprotocol/hono` and `createMcpHandler` from `@modelcontextprotocol/server`. Bearer auth gates `/mcp`; `/healthz` is open. Vercel recognizes `src/app.ts` as a Hono default export.
 
-Notes:
-
-- Render terminates TLS at its edge and forwards plain HTTP to `$PORT`. Bind to `0.0.0.0`, not `127.0.0.1`.
-- `SIGTERM` is sent on redeploys. Close cleanly so in-flight writes finish rather than become `*_UNCONFIRMED`.
+Host validation: on Vercel, `allowedHosts` is built from `VERCEL_URL`, `VERCEL_BRANCH_URL`, `VERCEL_PROJECT_PRODUCTION_URL`, plus optional `MCP_ALLOWED_HOSTS` (custom domains).
 
 ### 4.2 Secrets from environment: `src/config.ts` + `src/auth.ts`
-
-Render has no file upload for secrets, so add two optional variables. File paths keep working for local use.
 
 | Variable | Content | Behavior |
 | --- | --- | --- |
 | `GOOGLE_OAUTH_CREDENTIALS_JSON` | Contents of `credentials.json` (raw JSON or base64) | If set, used instead of `GOOGLE_OAUTH_CREDENTIALS_PATH`. |
-| `GOOGLE_OAUTH_TOKEN_JSON` | Contents of `token.json` (raw JSON or base64) | **Seed only.** On startup, if the file at `GOOGLE_OAUTH_TOKEN_PATH` does not exist, write this value to it with `saveToken()` (`0600`). After that, the file is the source of truth. |
-| `GOOGLE_OAUTH_TOKEN_PATH` | `/data/token.json` | Points at the Render disk. |
+| `GOOGLE_OAUTH_TOKEN_JSON` | Contents of `token.json` (raw JSON or base64) | **Durable source of truth on Vercel.** `AuthManager` falls back to this when no token file exists. |
+| `GOOGLE_OAUTH_TOKEN_PATH` | `/tmp/google-workspace-mcp-token.json` (auto on Vercel) | Opportunistic seed only; `/tmp` is not durable across cold starts. |
 
-Why seed to a disk instead of reading the variable on every start: `AuthManager` persists rotated refresh tokens through `saveToken()`. Google rarely rotates refresh tokens for this flow, but if it does and the token lives only in a variable, the new one is lost on the next restart. With a disk, it survives.
+Desktop-app refresh tokens rarely rotate. If Google does issue a new refresh token and only `/tmp` was updated, update `GOOGLE_OAUTH_TOKEN_JSON` in Vercel after a local `npm run auth`.
 
-### 4.3 Build and scripts: `package.json`
+### 4.3 Build and scripts
 
-```json
-"scripts": {
-  "start": "node dist/index.js",
-  "start:http": "node dist/http.js"
-}
-```
-
-`tsconfig.build.json` already compiles all of `src/`, so `dist/http.js` is produced by `npm run build`.
+- `npm run start` — stdio (`dist/index.js`)
+- `npm run start:http` — long-lived Node HTTP (`dist/http.js`), useful locally / Docker
+- `npm run deploy` — `vercel deploy --prod`
 
 ### 4.4 Tests
 
-- `tests/http.test.ts`: bearer auth, `/healthz`, startup fail-closed without `MCP_AUTH_TOKEN`.
-- `tests/auth.test.ts`: credentials from JSON/base64; token seeding writes `0600` and does not overwrite an existing file.
+- `tests/http.test.ts`: Node HTTP bearer auth, `/healthz`, fail-closed without `MCP_AUTH_TOKEN`.
+- `tests/app.test.ts`: Hono app bearer auth, `/healthz`, initialize.
+- `tests/auth.test.ts`: credentials from JSON/base64; `loadStoredToken` env fallback; token seeding.
 
 ---
 
-## 5. Container and Render Configuration
+## 5. Vercel Configuration
 
-### 5.1 `Dockerfile` + `docker-entrypoint.sh`
+### 5.1 `vercel.json`
 
-A Dockerfile pins the Node version. The host `node` on this machine defaults to 18, and the project needs 20.12 or newer (`util.parseEnv`).
-
-```dockerfile
-FROM node:20.19.6-slim AS build
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
-COPY tsconfig.json tsconfig.build.json ./
-COPY src ./src
-RUN npm run build && npm prune --omit=dev
-
-FROM node:20.19.6-slim
-ENV NODE_ENV=production
-WORKDIR /app
-COPY --from=build /app/package.json ./
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["node", "dist/http.js"]
+```json
+{
+  "framework": "hono",
+  "regions": ["iad1"],
+  "functions": {
+    "src/app.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
+}
 ```
 
-Render mounts the persistent disk as root. The entrypoint `chown`s `/data` to the `node` user, then drops privileges with `setpriv` before starting the app. Without that, seeding `/data/token.json` fails.
+`maxDuration: 60` covers Gmail/Docs latency on the hobby/pro function limits. Adjust the region to one near you if preferred.
 
-### 5.2 `.dockerignore`
+### 5.2 `.vercelignore`
 
-```text
-node_modules
-dist
-.env
-.env.*
-credentials*.json
-*token*.json
-secrets
-tests
-docs
-.git
-```
+Excludes `node_modules`, `dist`, secrets, tests, docs, and the optional Docker/Render leftovers from CLI uploads.
 
-### 5.3 `render.yaml`
-
-```yaml
-services:
-  - type: web
-    name: google-workspace-mcp
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    plan: 0.5c-512mb
-    numInstances: 1
-    healthCheckPath: /healthz
-    disk:
-      name: mcp-data
-      mountPath: /data
-      sizeGB: 1
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: LOG_LEVEL
-        value: info
-      - key: GOOGLE_OAUTH_TOKEN_PATH
-        value: /data/token.json
-      - key: MCP_AUTH_TOKEN
-        sync: false
-      - key: GOOGLE_OAUTH_CREDENTIALS_JSON
-        sync: false
-      - key: GOOGLE_OAUTH_TOKEN_JSON
-        sync: false
-```
-
-`sync: false` means you fill those secrets in the Render dashboard (they are not stored in git).
-
-**Do not use `plan: free`** for this service: free web services sleep after ~15 minutes idle (MCP hosts then time out on cold start), and free instances cannot attach a persistent disk. Use at least `0.5c-512mb`.
-
-### 5.4 Render service variables
+### 5.3 Environment variables
 
 | Variable | Value | Notes |
 | --- | --- | --- |
 | `MCP_AUTH_TOKEN` | Output of `openssl rand -base64 48` | Required. Store it in a password manager too. |
 | `GOOGLE_OAUTH_CREDENTIALS_JSON` | `base64 < credentials.json` | Required. |
-| `GOOGLE_OAUTH_TOKEN_JSON` | `base64 < ~/.config/google-workspace-mcp/token.json` | Required for the first boot only. |
-| `GOOGLE_OAUTH_TOKEN_PATH` | `/data/token.json` | Set by `render.yaml`; must be on the disk. |
+| `GOOGLE_OAUTH_TOKEN_JSON` | `base64 < ~/.config/google-workspace-mcp/token.json` | Required; **keep set** (unlike the old Render disk seed). |
+| `MCP_ALLOWED_HOSTS` | Custom domain hostnames | Optional. |
 | `LOG_LEVEL` | `info` | Optional. |
-| `PORT` | (set by Render) | Do not set manually. |
+
+Encode secrets locally (macOS):
+
+```bash
+openssl rand -base64 48
+base64 < credentials.json | tr -d '\n'
+base64 < ~/.config/google-workspace-mcp/token.json | tr -d '\n'
+```
 
 ---
 
@@ -218,12 +159,9 @@ services:
 
 ### 6.1 Google Cloud checks (once)
 
-1. Keep the existing **Desktop app** OAuth client. Consent still happens locally through `npm run auth`, so the loopback redirect continues to work; no Web client or Render redirect URI is needed.
-2. **Publishing status matters.** If the consent screen is *External* and in **Testing** status, Google expires refresh tokens after **7 days**. The deployed server would then fail with `AUTH_EXPIRED` every week. Choose one:
-   - Set the app to **In production**. For personal use with the sensitive `gmail.send` scope, an unverified app shows a warning screen to you but works.
-   - Or use an *Internal* app if your account is in a Google Workspace organization that allows it.
-   - Or accept weekly re-authorization (step 7.2).
-3. If your organization restricts third-party OAuth apps or hosting tokens on external platforms, get approval before uploading the refresh token to Render.
+1. Keep the existing **Desktop app** OAuth client. Consent still happens locally through `npm run auth`.
+2. **Publishing status matters.** If the consent screen is *External* and in **Testing** status, Google expires refresh tokens after **7 days**. Prefer **In production** (or *Internal* for Workspace).
+3. Confirm org policy allows storing the refresh token on Vercel before uploading it.
 
 ### 6.2 Implement and verify locally
 
@@ -240,70 +178,58 @@ In another terminal:
 ```bash
 curl -i http://localhost:3000/healthz                        # 200
 curl -i -X POST http://localhost:3000/mcp                    # 401
-npx @modelcontextprotocol/inspector                          # Streamable HTTP, URL http://localhost:3000/mcp,
-                                                             # header Authorization: Bearer <token>
 ```
 
-Also build and run the container to check Node version, file permissions, and that no secrets were copied:
+Optional: `npx vercel dev` (uses `src/app.ts`) after setting env vars in the Vercel project or a linked `.env`.
+
+### 6.3 Create the Vercel project
+
+1. Push this repo to GitHub (private recommended), **or** deploy from the CLI only.
+2. Install CLI if needed: `npm i -g vercel` (or use `npx vercel`).
+3. From the project root:
 
 ```bash
-docker build -t google-workspace-mcp .
-docker run --rm google-workspace-mcp ls -la /app             # no credentials/token/.env
+npx vercel login
+npx vercel link          # create/link project
+npx vercel env add MCP_AUTH_TOKEN production
+npx vercel env add GOOGLE_OAUTH_CREDENTIALS_JSON production
+npx vercel env add GOOGLE_OAUTH_TOKEN_JSON production
+# repeat for Preview if you want preview deployments to work
+npx vercel deploy --prod
 ```
 
-### 6.3 Create the Render service
+Hobby (free) works for this workload — no credit card required for the free tier’s normal limits. Enable Fluid compute if the dashboard offers a toggle (often on by default).
 
-1. Push this repo to GitHub (private recommended).
-2. In the [Render dashboard](https://dashboard.render.com/): **New → Blueprint**, select the repo (uses `render.yaml`), **or** **New → Web Service**, connect the repo, and set **Runtime: Docker**.
-3. Confirm plan is **`0.5c-512mb`** (or higher) and a **disk** is mounted at `/data` (1 GB is enough).
-
-### 6.4 Variables and domain
-
-1. Under **Environment**, set the secrets from §5.4 (`MCP_AUTH_TOKEN`, `GOOGLE_OAUTH_CREDENTIALS_JSON`, `GOOGLE_OAUTH_TOKEN_JSON`). `GOOGLE_OAUTH_TOKEN_PATH` is already `/data/token.json` via the Blueprint.
-2. Render assigns a public URL such as `https://google-workspace-mcp.onrender.com`. Custom domains are optional.
-
-Encode secrets locally (macOS):
+### 6.4 Deploy and verify
 
 ```bash
-openssl rand -base64 48
-base64 < credentials.json | tr -d '\n'
-base64 < ~/.config/google-workspace-mcp/token.json | tr -d '\n'
-```
-
-### 6.5 Deploy and verify
-
-Deploy happens automatically on push when the repo is connected, or click **Manual Deploy** in the dashboard. In **Logs**, expect `server.started` with `transport: "http"`.
-
-```bash
-URL=https://<your-service>.onrender.com
+URL=https://<your-project>.vercel.app
 curl -i $URL/healthz                                         # 200
 curl -i -X POST $URL/mcp                                     # 401
 ```
 
-Then connect MCP Inspector to `$URL/mcp` with the bearer header. Run `tools/list` (expect two tools) and one call with **invalid** input (expect `VALIDATION_ERROR`, no Google call).
+Connect MCP Inspector to `$URL/mcp` with the bearer header. Run `tools/list` (expect two tools) and one call with **invalid** input (expect `VALIDATION_ERROR`, no Google call).
 
-After the first successful start, **delete `GOOGLE_OAUTH_TOKEN_JSON`** from the Render env vars and redeploy (or clear + save). The token now lives on the disk, so the variable is just a second copy of the secret.
-
-### 6.6 End-to-end checks (test account, as in `problemStatement.md` §10)
+### 6.5 End-to-end checks (test account)
 
 1. `send_email` to an address you own; confirm it arrives and appears in Sent.
 2. `append_to_google_doc` to a test document; confirm the text is at the end.
-3. Redeploy; confirm a tool call still works (token survived on the disk).
-4. Check Render logs contain no email bodies, document text, or tokens.
+3. Redeploy / wait for a cold start; confirm a tool call still works (token came from env).
+4. Check Vercel logs contain no email bodies, document text, or tokens.
 
 ---
 
 ## 7. Connecting MCP Hosts
 
-All hosts use the URL `https://<your-service>.onrender.com/mcp` and the header `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on; do not enable auto-approve.
+All hosts use `https://<your-project>.vercel.app/mcp` and `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on.
 
-**Cursor** (`~/.cursor/mcp.json`). Cursor supports `${env:VAR}` interpolation, which keeps the token out of the file. See also [`examples/cursor.render.mcp.json`](../examples/cursor.render.mcp.json):
+**Cursor** (`~/.cursor/mcp.json`) — see [`examples/cursor.vercel.mcp.json`](../examples/cursor.vercel.mcp.json):
 
 ```json
 {
   "mcpServers": {
     "google-workspace": {
-      "url": "https://<your-service>.onrender.com/mcp",
+      "url": "https://<your-project>.vercel.app/mcp",
       "headers": { "Authorization": "Bearer ${env:GOOGLE_WORKSPACE_MCP_TOKEN}" }
     }
   }
@@ -313,25 +239,24 @@ All hosts use the URL `https://<your-service>.onrender.com/mcp` and the header `
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http google-workspace https://<your-service>.onrender.com/mcp \
+claude mcp add --transport http google-workspace https://<your-project>.vercel.app/mcp \
   --header "Authorization: Bearer $GOOGLE_WORKSPACE_MCP_TOKEN"
 ```
 
-**Claude Desktop / Antigravity:** remote-server support and header options differ by version. If a host only accepts OAuth-based remote connectors, either keep using the local stdio entry for that host, or bridge with `npx mcp-remote <url> --header "Authorization: Bearer ..."`. Check each host's current docs before relying on this.
-
 ### 7.1 Local and remote together
 
-The local stdio setup keeps working. Running both against the same Google account is fine; they hold independent copies of the refresh token.
+Local stdio keeps working. Both may target the same Google account with independent token copies.
 
 ### 7.2 Re-authorizing the deployed server
 
 When tools return `AUTH_EXPIRED` or `AUTH_REQUIRED`:
 
 ```bash
-nvm use && npm run auth                                       # locally, refreshes ~/.config/.../token.json
+nvm use && npm run auth
+base64 < ~/.config/google-workspace-mcp/token.json | tr -d '\n'
 ```
 
-Then put the new token on the disk. Either open a Render **Shell** on the service and `rm /data/token.json`, set `GOOGLE_OAUTH_TOKEN_JSON` again, and redeploy; or overwrite `/data/token.json` via Shell after encoding locally. A small authenticated admin route is out of scope.
+Update `GOOGLE_OAUTH_TOKEN_JSON` in the Vercel project (Production + Preview as needed) and redeploy (or rely on env change + next invocation, depending on how you set the var).
 
 ---
 
@@ -339,14 +264,13 @@ Then put the new token on the disk. Either open a Render **Shell** on the servic
 
 | Topic | Plan |
 | --- | --- |
-| Health | Render health check on `/healthz` (process liveness only; it does not call Google). |
-| Logs | Render dashboard → **Logs**. Existing structured stderr logs with redaction. |
-| Restarts | Platform restarts on crash; `SIGTERM` handled for clean redeploys. |
-| Scaling | Fixed at 1 instance (S7). The workload is a few calls per day. |
-| Sleep | Free plan sleeps — do **not** use it. `0.5c-512mb` stays warm. |
-| Cost | One small always-on `0.5c-512mb` service plus a 1 GB disk. Check current Render pricing. |
-| Rollback | Render dashboard → **Events** / prior deploy → redeploy. The disk is unaffected. |
-| Kill switch | Remove or change `MCP_AUTH_TOKEN` (instantly blocks all callers), or revoke the app at [myaccount.google.com/permissions](https://myaccount.google.com/permissions) (blocks Google access). |
+| Health | `GET /healthz` (liveness only; does not call Google). |
+| Logs | Vercel dashboard → project → **Logs**. Structured stderr with redaction. |
+| Cold starts | First request after idle can be slower; Fluid compute reduces idle cost. |
+| Scaling | Platform scales the Function; workload is a few calls per day. |
+| Cost | Hobby free tier is enough for personal use; watch function duration limits. |
+| Rollback | Vercel **Instant Rollback** / promote a previous deployment. |
+| Kill switch | Change or remove `MCP_AUTH_TOKEN`, or revoke Google access at [myaccount.google.com/permissions](https://myaccount.google.com/permissions). |
 
 ---
 
@@ -354,26 +278,25 @@ Then put the new token on the disk. Either open a Render **Shell** on the servic
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| `MCP_AUTH_TOKEN` leaks (shell history, shared config) | Anyone can send email as you | Long random token, env interpolation in host configs, rotate on suspicion, Google revoke as backstop. |
-| Prompt injection through a host | Unwanted writes | Unchanged from local design: host approval, tool descriptions, no auto-approve. |
+| `MCP_AUTH_TOKEN` leaks | Anyone can send email as you | Long random token, env interpolation in host configs, rotate on suspicion, Google revoke as backstop. |
+| Prompt injection through a host | Unwanted writes | Unchanged: host approval, tool descriptions, no auto-approve. |
 | Refresh token expires after 7 days (Testing status) | Weekly `AUTH_EXPIRED` | Publish the consent screen (§6.1). |
-| Disk not writable by app user | Seeding or rotation fails | `docker-entrypoint.sh` chowns `/data` then drops to `node`. |
-| Free plan / no disk | Cold starts + lost token on redeploy | Use `0.5c-512mb` + disk (§5.3). |
-| Host lacks header support for remote servers | Cannot connect | Use the local stdio entry or `mcp-remote` for that host. |
-| Org policy forbids storing Google tokens on third-party hosting | Compliance issue | Confirm before step 6.4. |
+| No durable disk; rotated refresh token only in `/tmp` | Next cold start uses stale env token | Keep `GOOGLE_OAUTH_TOKEN_JSON` updated; Desktop apps rarely rotate refresh tokens. |
+| Host lacks header support for remote servers | Cannot connect | Use local stdio or `mcp-remote`. |
+| Org policy forbids storing Google tokens on Vercel | Compliance issue | Confirm before §6.3. |
+| Function timeout | Tool call fails mid-flight | `maxDuration: 60`; uncertain writes already surface as `*_UNCONFIRMED`. |
 
 ---
 
 ## 10. Work Checklist
 
 - [ ] §6.1 Google consent screen publishing status decided
-- [x] §4.1 `src/http.ts` with bearer auth, `/healthz`, graceful shutdown
-- [x] §4.2 `GOOGLE_OAUTH_CREDENTIALS_JSON` / `GOOGLE_OAUTH_TOKEN_JSON` support and token seeding
-- [x] §4.3 `start:http` script
-- [x] §4.4 HTTP and auth tests passing
-- [x] §5 `Dockerfile`, `docker-entrypoint.sh`, `.dockerignore`, `render.yaml`
-- [ ] §6.2 Local HTTP and container verification
-- [ ] §6.3–6.5 Render service, disk, variables, domain, deploy
-- [ ] §6.5 `GOOGLE_OAUTH_TOKEN_JSON` removed after first boot
-- [ ] §6.6 End-to-end checks
-- [x] §7 Host configs updated; README section "Remote deployment (Render)" added
+- [x] §4.1 `src/app.ts` / `src/create-app.ts` with bearer auth, `/healthz`
+- [x] §4.2 Env-backed token load (`loadStoredToken`) + optional `/tmp` seed on Vercel
+- [x] §4.3 Scripts; Node HTTP entry kept for local use
+- [x] §4.4 HTTP / Hono / auth tests
+- [x] §5 `vercel.json`, `.vercelignore`
+- [ ] §6.2 Local HTTP verification
+- [ ] §6.3–6.4 Vercel project, env vars, deploy
+- [ ] §6.5 End-to-end checks
+- [x] §7 Host config example; README section for Vercel

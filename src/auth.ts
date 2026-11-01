@@ -85,7 +85,22 @@ export async function readToken(path: string): Promise<StoredToken> {
   return parseStoredToken(raw, path);
 }
 
-function parseStoredToken(raw: string, source: string): StoredToken {
+/**
+ * Loads the refresh token from the token file when present, otherwise from
+ * `GOOGLE_OAUTH_TOKEN_JSON` (serverless / Vercel has no durable disk).
+ */
+export async function loadStoredToken(config: Config): Promise<StoredToken> {
+  try {
+    return await readToken(config.tokenPath);
+  } catch (err) {
+    if (err instanceof ToolError && err.code === 'AUTH_REQUIRED' && config.tokenSeedJson) {
+      return parseStoredToken(config.tokenSeedJson, 'GOOGLE_OAUTH_TOKEN_JSON');
+    }
+    throw err;
+  }
+}
+
+export function parseStoredToken(raw: string, source: string): StoredToken {
   let token: Partial<StoredToken>;
   try {
     token = JSON.parse(raw);
@@ -155,7 +170,7 @@ export class AuthManager {
     if (this.client) return this.client;
 
     const creds = await loadClientCredentials(this.config);
-    const token = await readToken(this.config.tokenPath);
+    const token = await loadStoredToken(this.config);
 
     if (token.client_id !== creds.clientId) {
       throw new ToolError('AUTH_REQUIRED', `The stored authorization was issued for a different OAuth client. ${REAUTH}`);

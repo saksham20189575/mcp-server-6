@@ -5,6 +5,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AuthManager,
+  loadStoredToken,
   parseClientCredentials,
   readClientCredentials,
   saveToken,
@@ -68,6 +69,27 @@ describe('readClientCredentials / parseClientCredentials', () => {
     expect(await codeOf(readClientCredentials(join(dir, 'missing.json')))).toBe('CONFIG_ERROR');
     await writeFile(credentialsPath, JSON.stringify({ web: { client_id: 'x', client_secret: 'y' } }));
     expect(await codeOf(readClientCredentials(credentialsPath))).toBe('CONFIG_ERROR');
+  });
+});
+
+describe('loadStoredToken', () => {
+  it('reads from the token file when present', async () => {
+    await saveToken(tokenPath, token());
+    const loaded = await loadStoredToken({ credentialsPath, tokenPath });
+    expect(loaded.refresh_token).toBe('refresh-1');
+  });
+
+  it('falls back to GOOGLE_OAUTH_TOKEN_JSON when the file is missing', async () => {
+    const loaded = await loadStoredToken({
+      credentialsPath,
+      tokenPath,
+      tokenSeedJson: JSON.stringify(token({ refresh_token: 'from-env' })),
+    });
+    expect(loaded.refresh_token).toBe('from-env');
+  });
+
+  it('returns AUTH_REQUIRED when neither file nor seed exists', async () => {
+    expect(await codeOf(loadStoredToken({ credentialsPath, tokenPath }))).toBe('AUTH_REQUIRED');
   });
 });
 

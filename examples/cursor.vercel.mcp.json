@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "google-workspace": {
-      "url": "https://<your-service>.onrender.com/mcp",
+      "url": "https://<your-project>.vercel.app/mcp",
       "headers": {
         "Authorization": "Bearer ${env:GOOGLE_WORKSPACE_MCP_TOKEN}"
       }

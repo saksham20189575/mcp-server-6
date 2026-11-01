@@ -70,8 +70,9 @@ Re-run it any time a tool reports `AUTH_REQUIRED`, `AUTH_EXPIRED`, or `AUTH_SCOP
 | `GOOGLE_OAUTH_CREDENTIALS_PATH` | `<project>/secrets/credentials.json` | Desktop OAuth client JSON |
 | `GOOGLE_OAUTH_TOKEN_PATH` | `~/.config/google-workspace-mcp/token.json` | Refresh token store |
 | `GOOGLE_OAUTH_CREDENTIALS_JSON` | (unset) | Inline client JSON (raw or base64); overrides the path when set |
-| `GOOGLE_OAUTH_TOKEN_JSON` | (unset) | Seed for the token file on first boot only (raw or base64) |
+| `GOOGLE_OAUTH_TOKEN_JSON` | (unset) | Refresh token JSON (raw or base64). Required on Vercel; also seeds a token file when missing |
 | `MCP_AUTH_TOKEN` | (required for HTTP) | Bearer token for `POST /mcp` (≥32 chars) |
+| `MCP_ALLOWED_HOSTS` | (unset) | Extra hostnames for Host validation on Vercel (comma-separated) |
 | `LOG_LEVEL` | `info` | Set to `debug` for more stderr logs |
 | `PORT` | `3000` | HTTP listen port (`start:http` / Docker) |
 
@@ -197,23 +198,21 @@ Failures return `isError: true` with `{ "success": false, "error": "<CODE>", "me
 | `GMAIL_SEND_UNCONFIRMED` / `DOCS_APPEND_UNCONFIRMED` | **The result is unknown.** Check your Sent folder or the document before retrying. The server never retries writes automatically. |
 | `GOOGLE_API_ERROR` / `INTERNAL_ERROR` | Unexpected; see the stderr logs. |
 
-## Remote deployment (Render)
+## Remote deployment (Vercel)
 
-The same tools can run as a single-replica HTTPS service on [Render](https://render.com). Full steps are in [`docs/deployment-plan.md`](docs/deployment-plan.md). Summary:
+The same tools can run as a serverless HTTPS Function on [Vercel](https://vercel.com) (Hobby free tier — no credit card required for normal personal use). Full steps are in [`docs/deployment-plan.md`](docs/deployment-plan.md). Summary:
 
 1. Keep consent local: `npm run auth` on your machine (Desktop OAuth client). Prefer publishing the consent screen to **In production** so refresh tokens do not expire after 7 days.
-2. Build artifacts: `Dockerfile`, `docker-entrypoint.sh`, `.dockerignore`, and `render.yaml` are in the repo. The image runs `node dist/http.js` on `$PORT`.
-3. Render setup: create a **Web Service** from this repo (Docker), use plan **`0.5c-512mb`** (or higher) with a **1 GB disk** mounted at `/data`, set env vars, deploy. Free instances sleep when idle and cannot attach disks — avoid them for this server.
+2. Entry point: `src/app.ts` exports a Hono app (`/mcp` + `/healthz`). Config: `vercel.json`, `.vercelignore`.
+3. Deploy: `npx vercel` (or connect the GitHub repo), set env vars, `npx vercel deploy --prod`.
 
 | Variable | Notes |
 | --- | --- |
-| `MCP_AUTH_TOKEN` | `openssl rand -base64 48` — required; process exits if missing/short |
+| `MCP_AUTH_TOKEN` | `openssl rand -base64 48` — required; startup fails if missing/short |
 | `GOOGLE_OAUTH_CREDENTIALS_JSON` | `base64 < credentials.json` (or raw JSON) |
-| `GOOGLE_OAUTH_TOKEN_JSON` | `base64 < ~/.config/google-workspace-mcp/token.json` — **first boot seed only** |
-| `GOOGLE_OAUTH_TOKEN_PATH` | `/data/token.json` |
+| `GOOGLE_OAUTH_TOKEN_JSON` | `base64 < ~/.config/google-workspace-mcp/token.json` — **keep set** (Vercel has no durable disk) |
+| `MCP_ALLOWED_HOSTS` | optional custom domain hostnames (comma-separated) |
 | `LOG_LEVEL` | optional (`info`) |
-
-After the first successful start, **delete `GOOGLE_OAUTH_TOKEN_JSON`** from Render env vars; the disk file is the source of truth (including any rotated refresh token).
 
 Local HTTP check before deploying:
 
@@ -225,7 +224,7 @@ MCP_AUTH_TOKEN="$(openssl rand -base64 48)" PORT=3000 npm run start:http
 # curl -i -X POST http://localhost:3000/mcp  → 401
 ```
 
-Connect hosts to `https://<your-service>.onrender.com/mcp` with `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on. Example snippet: [`examples/cursor.render.mcp.json`](examples/cursor.render.mcp.json).
+Connect hosts to `https://<your-project>.vercel.app/mcp` with `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on. Example snippet: [`examples/cursor.vercel.mcp.json`](examples/cursor.vercel.mcp.json).
 
 **Cursor** (`~/.cursor/mcp.json`) — use env interpolation so the token is not stored in the file:
 
@@ -233,7 +232,7 @@ Connect hosts to `https://<your-service>.onrender.com/mcp` with `Authorization: 
 {
   "mcpServers": {
     "google-workspace": {
-      "url": "https://<your-service>.onrender.com/mcp",
+      "url": "https://<your-project>.vercel.app/mcp",
       "headers": { "Authorization": "Bearer ${env:GOOGLE_WORKSPACE_MCP_TOKEN}" }
     }
   }
@@ -243,11 +242,11 @@ Connect hosts to `https://<your-service>.onrender.com/mcp` with `Authorization: 
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http google-workspace https://<your-service>.onrender.com/mcp \
+claude mcp add --transport http google-workspace https://<your-project>.vercel.app/mcp \
   --header "Authorization: Bearer $GOOGLE_WORKSPACE_MCP_TOKEN"
 ```
 
-Local stdio and the remote HTTP deployment can both target the same Google account. To re-authorize the deployed server after `AUTH_EXPIRED`, run `npm run auth` locally, then re-seed the disk (see the deployment plan §7.2).
+Local stdio and the remote HTTP deployment can both target the same Google account. To re-authorize after `AUTH_EXPIRED`, run `npm run auth` locally, then update `GOOGLE_OAUTH_TOKEN_JSON` in Vercel (see the deployment plan §7.2).
 
 ## Development
 
@@ -267,7 +266,9 @@ The stdio server logs to **stderr only**; stdout carries MCP JSON-RPC. The HTTP 
 ```text
 src/
   index.ts        entry point: config → auth → stdio server
-  http.ts         entry point: bearer auth → Streamable HTTP on /mcp
+  app.ts          Vercel entry: default-export Hono MCP app
+  create-app.ts   Hono app factory (bearer /mcp + /healthz)
+  http.ts         long-lived Node HTTP entry (local / Docker)
   server.ts       McpServer + tool registration
   auth.ts         token load/save/refresh/seed (AuthManager)
   gmail.ts        send_email
@@ -280,7 +281,7 @@ src/
 scripts/authorize.ts   npm run auth
 tests/                 vitest suites
 examples/              host config snippets
-Dockerfile / render.yaml    Render deploy
+vercel.json            Vercel (Hono) deploy
 ```
 
 ## Manual end-to-end checklist

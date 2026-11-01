@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "hono",
+  "regions": ["iad1"],
+  "functions": {
+    "src/app.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  }
+}
