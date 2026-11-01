@@ -1,6 +1,6 @@
 FROM node:20.19.6-slim AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
