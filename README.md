@@ -197,13 +197,13 @@ Failures return `isError: true` with `{ "success": false, "error": "<CODE>", "me
 | `GMAIL_SEND_UNCONFIRMED` / `DOCS_APPEND_UNCONFIRMED` | **The result is unknown.** Check your Sent folder or the document before retrying. The server never retries writes automatically. |
 | `GOOGLE_API_ERROR` / `INTERNAL_ERROR` | Unexpected; see the stderr logs. |
 
-## Remote deployment (Railway)
+## Remote deployment (Render)
 
-The same tools can run as a single-replica HTTPS service. Full steps are in [`docs/deployment-plan.md`](docs/deployment-plan.md). Summary:
+The same tools can run as a single-replica HTTPS service on [Render](https://render.com). Full steps are in [`docs/deployment-plan.md`](docs/deployment-plan.md). Summary:
 
 1. Keep consent local: `npm run auth` on your machine (Desktop OAuth client). Prefer publishing the consent screen to **In production** so refresh tokens do not expire after 7 days.
-2. Build artifacts: `Dockerfile`, `.dockerignore`, and `railway.json` are in the repo. The image runs `node dist/http.js` on `$PORT`.
-3. Railway setup: mount a volume at `/data`, set variables, generate a public domain, deploy with one replica.
+2. Build artifacts: `Dockerfile`, `docker-entrypoint.sh`, `.dockerignore`, and `render.yaml` are in the repo. The image runs `node dist/http.js` on `$PORT`.
+3. Render setup: create a **Web Service** from this repo (Docker), use plan **`0.5c-512mb`** (or higher) with a **1 GB disk** mounted at `/data`, set env vars, deploy. Free instances sleep when idle and cannot attach disks — avoid them for this server.
 
 | Variable | Notes |
 | --- | --- |
@@ -213,7 +213,7 @@ The same tools can run as a single-replica HTTPS service. Full steps are in [`do
 | `GOOGLE_OAUTH_TOKEN_PATH` | `/data/token.json` |
 | `LOG_LEVEL` | optional (`info`) |
 
-After the first successful start, **delete `GOOGLE_OAUTH_TOKEN_JSON`** from Railway variables; the volume file is the source of truth (including any rotated refresh token).
+After the first successful start, **delete `GOOGLE_OAUTH_TOKEN_JSON`** from Render env vars; the disk file is the source of truth (including any rotated refresh token).
 
 Local HTTP check before deploying:
 
@@ -225,7 +225,7 @@ MCP_AUTH_TOKEN="$(openssl rand -base64 48)" PORT=3000 npm run start:http
 # curl -i -X POST http://localhost:3000/mcp  → 401
 ```
 
-Connect hosts to `https://<your-domain>.up.railway.app/mcp` with `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on.
+Connect hosts to `https://<your-service>.onrender.com/mcp` with `Authorization: Bearer <MCP_AUTH_TOKEN>`. Keep host approval prompts on. Example snippet: [`examples/cursor.render.mcp.json`](examples/cursor.render.mcp.json).
 
 **Cursor** (`~/.cursor/mcp.json`) — use env interpolation so the token is not stored in the file:
 
@@ -233,7 +233,7 @@ Connect hosts to `https://<your-domain>.up.railway.app/mcp` with `Authorization:
 {
   "mcpServers": {
     "google-workspace": {
-      "url": "https://<your-domain>.up.railway.app/mcp",
+      "url": "https://<your-service>.onrender.com/mcp",
       "headers": { "Authorization": "Bearer ${env:GOOGLE_WORKSPACE_MCP_TOKEN}" }
     }
   }
@@ -243,11 +243,11 @@ Connect hosts to `https://<your-domain>.up.railway.app/mcp` with `Authorization:
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http google-workspace https://<your-domain>.up.railway.app/mcp \
+claude mcp add --transport http google-workspace https://<your-service>.onrender.com/mcp \
   --header "Authorization: Bearer $GOOGLE_WORKSPACE_MCP_TOKEN"
 ```
 
-Local stdio and the remote HTTP deployment can both target the same Google account. To re-authorize the deployed server after `AUTH_EXPIRED`, run `npm run auth` locally, then re-seed the volume (see the deployment plan §7.2).
+Local stdio and the remote HTTP deployment can both target the same Google account. To re-authorize the deployed server after `AUTH_EXPIRED`, run `npm run auth` locally, then re-seed the disk (see the deployment plan §7.2).
 
 ## Development
 
@@ -280,7 +280,7 @@ src/
 scripts/authorize.ts   npm run auth
 tests/                 vitest suites
 examples/              host config snippets
-Dockerfile / railway.json   Railway deploy
+Dockerfile / render.yaml    Render deploy
 ```
 
 ## Manual end-to-end checklist

@@ -12,5 +12,8 @@ WORKDIR /app
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-USER node
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
+# Start as root so the entrypoint can chown a host-mounted /data, then drop to node.
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/http.js"]

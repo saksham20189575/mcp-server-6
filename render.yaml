@@ -1,0 +1,32 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Deploy: connect this repo in the Render dashboard, or `render blueprint launch`.
+# Secrets (sync: false) must be set in the dashboard before the first deploy.
+#
+# Use at least 0.5c-512mb so the service stays warm and can attach a disk.
+# Free web services sleep after idle and do not support persistent disks.
+
+services:
+  - type: web
+    name: google-workspace-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: 0.5c-512mb
+    numInstances: 1
+    healthCheckPath: /healthz
+    disk:
+      name: mcp-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: GOOGLE_OAUTH_TOKEN_PATH
+        value: /data/token.json
+      - key: MCP_AUTH_TOKEN
+        sync: false
+      - key: GOOGLE_OAUTH_CREDENTIALS_JSON
+        sync: false
+      - key: GOOGLE_OAUTH_TOKEN_JSON
+        sync: false
