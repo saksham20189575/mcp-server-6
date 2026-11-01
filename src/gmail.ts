@@ -1,7 +1,44 @@
-import MailComposer from 'nodemailer/lib/mail-composer';
+import mailComposerModule from 'nodemailer/lib/mail-composer';
 import type { gmail_v1 } from 'googleapis';
 import { mapGoogleError } from './errors.js';
 import type { SendEmailInput } from './validation.js';
+
+interface MailComposerOptions {
+  to: string;
+  subject: string;
+  text: string;
+  textEncoding: 'base64';
+  disableFileAccess: boolean;
+  disableUrlAccess: boolean;
+}
+
+interface MailComposer {
+  compile(): { build(): Promise<Buffer> };
+}
+
+type MailComposerConstructor = new (options: MailComposerOptions) => MailComposer;
+
+/**
+ * Nodemailer 10 ships separate CJS and ESM declarations for this entry.
+ * Vercel's typecheck loads the CJS declaration, which types a default import
+ * as the module namespace (`typeof import(...)`) rather than the class. The
+ * ESM declaration types the same import as the class. Both builds put the
+ * constructor on the value itself; the CJS build also sets `.default`.
+ */
+function resolveMailComposer(exported: unknown): MailComposerConstructor {
+  if (typeof exported === 'function') return exported as MailComposerConstructor;
+  if (
+    exported !== null &&
+    typeof exported === 'object' &&
+    'default' in exported &&
+    typeof exported.default === 'function'
+  ) {
+    return exported.default as MailComposerConstructor;
+  }
+  throw new Error('nodemailer MailComposer export is not constructable');
+}
+
+const MailComposer = resolveMailComposer(mailComposerModule);
 
 export interface RequestOptions {
   retry?: boolean;
@@ -40,9 +77,7 @@ export async function buildRawMessage(input: SendEmailInput): Promise<string> {
     disableFileAccess: true,
     disableUrlAccess: true,
   });
-  const message = await new Promise<Buffer>((resolve, reject) => {
-    mail.compile().build((err, msg) => (err ? reject(err) : resolve(msg)));
-  });
+  const message = await mail.compile().build();
   return message.toString('base64url');
 }
 
